@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  A Glue Job to move data from a dynamodb table to an elastic cluster
+
+Parameters:
+  DynamoDBTable:
+    Type: String
+    Default: 'DestinationDynamoTable'
+  ElasticSearchEndpoint:
+    Type: String
+    Default: 'https://vpc-domain-xfhzfdjianfutkpmsyp9zota9a.eu-west-1.es.amazonaws.com'
+  S3Bucket:
+    Type: String
+    Default: '999999999999-binaries'
+    MinLength: '1'
+  ExistingVpcId:
+    Type : 'AWS::EC2::VPC::Id'
+    ConstraintDescription: 'VPC ID'
+    Default: 'vpc-xxxxxxxxxxxxxxxxx'
+  ExistingSubnetId:
+    Type : 'String'
+    ConstraintDescription: 'Private Subnet ID'
+
+Resources:
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all traffic
+      VpcId: !Ref ExistingVpcId
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg
+
+  SelfReferencingIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      Description: Allow access between security groups.
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref InstanceSecurityGroup
+
+  ETLVpcConnection:
+    Type: 'AWS::Glue::Connection'
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionProperties:
+          Description: "Connection to the VPC that grants access to the elastic search cluster."
+          Name: ETLPrivateVpcConnection
+        ConnectionType: "NETWORK"
+        PhysicalConnectionRequirements:
+          AvailabilityZone:
+            Fn::Select:
+              - 0
+              - Fn::GetAZs: ""
+          SecurityGroupIdList:
+            - !Ref InstanceSecurityGroup
+          SubnetId: !Ref ExistingSubnetId
+
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-role'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess'
+        - 'arn:aws:iam::aws:policy/AWSGlueConsoleFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonEC2FullAccess'
+
+  ETLDynamoToElastic:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: ETLDynamoToElastic
+      GlueVersion: 2.0
+      Command:
+        Name:  glueetl
+        ScriptLocation: ./script.py
+      Connections:
+        Connections:
+          - !Ref ETLVpcConnection
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+      DefaultArguments:
+        "--job-language": "python"
+        "--extra-jars": !Sub "s3://${S3Bucket}/glue-hadoop-driver/elasticsearch-hadoop-7.8.0.jar"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--class": "GlueWriteToDynamoDB"
+        "--dynamo_table_name": !Sub ${DynamoDBTable}
+        "--es_endpoint": !Sub ${ElasticSearchEndpoint}
+      Role: !GetAtt GlueRole.Arn
+      Description: "Job that gets the DynamoDB data to the elasticsearch cluster"
